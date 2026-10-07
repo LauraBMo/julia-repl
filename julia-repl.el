@@ -47,6 +47,9 @@
 (require 'seq)
 (require 'subr-x)
 
+;; Soft dependency, called only when julia-help registered the JSON type.
+(declare-function julia-help-show "julia-help" (kind mime data))
+
 ;;
 ;; customizations
 ;;
@@ -401,6 +404,15 @@ generate a buffer name.")
 Valid values are NIL or a string. These take effect the next time
 a new Julia process is started.")
 
+(defvar julia-repl-show-mime-types
+  '("documentation/text/html")
+  "MIME types advertised to Julia as JULIA_REPL_SHOW at process start.
+
+EmacsVterm.jl reads it to pick what to send; packages that render
+more add to this list. Images are absent by design: EmacsVterm.jl
+gates them on its own `options.image'. A running process keeps the
+old value.")
+
 (defvar julia-repl-compilation-location-legacy nil
   "Whether to include recognize various legacy error messages in compilation output.
  Mainly useful if you are using Julia <1.6.")
@@ -632,9 +644,15 @@ Valid keys are the first items in ‘julia-repl-executable-records’."
         (julia-repl--complete-executable-record! executable-record)
         (let* ((executable-path (julia-repl--executable-path executable-record))
                (basedir (plist-get (cddr executable-record) :basedir))
-               (inferior-buffer (julia-repl--make-buffer terminal-backend name executable-path
-                                                         (when switches
-                                                           (split-string switches)))))
+               (inferior-buffer
+                ;; Tell EmacsVterm.jl what `julia-repl--show' can render.
+                (let ((process-environment
+                       (cons (concat "JULIA_REPL_SHOW="
+                                     (string-join julia-repl-show-mime-types ","))
+                             process-environment)))
+                  (julia-repl--make-buffer terminal-backend name executable-path
+                                           (when switches
+                                             (split-string switches))))))
           (when julia-repl-compilation-mode
             (julia-repl--setup-compilation-mode inferior-buffer basedir))
           (julia-repl--run-hooks inferior-buffer)
@@ -909,6 +927,14 @@ When called with a prefix argument, activate the home project."
   (interactive)
   (julia-repl--send-string "ENV[\"JULIA_EDITOR\"] = \"emacsclient\";"))
 
+(defun julia-repl--show-html (html)
+  "Show HTML documentation in a `*julia-doc*' buffer."
+  (with-current-buffer-window "*julia-doc*" nil nil
+    (insert html)
+    (shr-render-region (point-min) (point-max))
+    (goto-char (point-min))
+    (view-mode-enter)))
+
 (defun julia-repl--show (kind mime base64data)
   "Show data sent from Julia via EmacsVterm.jl in some Emacs window.
 KIND identifies the type of data being sent, MIME is the mime
@@ -920,11 +946,11 @@ later, things like showing inline images or rendered LaTeX might
 be added."
   (pcase `(,kind . ,mime)
     ('("documentation" . "text/html")
-     (with-current-buffer-window "*julia-doc*" nil nil
-       (insert (decode-coding-string (base64-decode-string base64data) 'utf-8))
-       (shr-render-region (point-min) (point-max))
-       (goto-char (point-min))
-       (view-mode-enter)))
+     (julia-repl--show-html
+      (decode-coding-string (base64-decode-string base64data) 'utf-8)))
+    ('("documentation" . "application/json")
+     ;; Sent only when julia-help added itself to `julia-repl-show-mime-types'.
+     (julia-help-show kind mime base64data))
     (`("image" . ,_)
      (with-current-buffer-window "*julia-img*" nil nil
        (let ((imgdata (base64-decode-string base64data)))
